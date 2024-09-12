@@ -2,12 +2,15 @@
 
 # Python standard library
 import logging
+import os
+from urllib.parse import urlparse
 
 # external dependencies
 import click
 
 # imports from this very package
 from brother_ql.devicedependent import models, label_sizes, label_type_specs, DIE_CUT_LABEL, ENDLESS_LABEL, ROUND_DIE_CUT_LABEL
+from brother_ql.models import ModelsManager
 from brother_ql.backends import available_backends, backend_factory
 
 
@@ -43,7 +46,35 @@ def cli(ctx, *args, **kwargs):
 def discover(ctx):
     """ find connected label printers """
     backend = ctx.meta.get('BACKEND', 'pyusb')
-    discover_and_list_available_devices(backend)
+    if backend is None:
+        logger.info("Defaulting to pyusb as backend for discovery.")
+        backend = "pyusb"
+    from brother_ql.backends.helpers import discover, get_printer, get_status
+
+    available_devices = discover(backend_identifier=backend)
+    for device in available_devices:
+        status = None
+
+        # skip network discovery since it's not supported
+        if backend == "pyusb" or backend == "linux_kernel":
+            logger.info(f"Probing device at {device['identifier']}")
+
+            # check permissions before accessing lp* devices
+            if backend == "linux_kernel":
+                url = urlparse(device["identifier"])
+                if not os.access(url.path, os.W_OK):
+                    logger.info(
+                        f"Cannot access device {device['identifier']} due to insufficient permissions. You need to be a part of the lp group to access printers with this backend."
+                    )
+                    continue
+
+            # send status request
+            printer = get_printer(
+                printer_identifier=device["identifier"],
+                backend_identifier=backend,
+            )
+            status = get_status(printer)
+            print(f"Found a label printer at: {device['identifier']} ({status['model']})")
 
 def discover_and_list_available_devices(backend):
     from brother_ql.backends.helpers import discover
@@ -120,7 +151,7 @@ def env(ctx, *args, **kwargs):
 
 @cli.command('print', short_help='Print a label')
 @click.argument('images', nargs=-1, type=click.File('rb'), metavar='IMAGE [IMAGE] ...')
-@click.option('-l', '--label', type=click.Choice(label_sizes), envvar='BROTHER_QL_LABEL', help='The label (size, type - die-cut or endless). Run `brother_ql info labels` for a full list including ideal pixel dimensions.')
+@click.option('-l', '--label', required=True, type=click.Choice(label_sizes), envvar='BROTHER_QL_LABEL', help='The label (size, type - die-cut or endless). Run `brother_ql info labels` for a full list including ideal pixel dimensions.')
 @click.option('-r', '--rotate', type=click.Choice(('auto', '0', '90', '180', '270')), default='auto', help='Rotate the image (counterclock-wise) by this amount of degrees.')
 @click.option('-t', '--threshold', type=float, default=70.0, help='The threshold value (in percent) to discriminate between black and white pixels.')
 @click.option('-d', '--dither', is_flag=True, help='Enable dithering when converting the image to b/w. If set, --threshold is meaningless.')
@@ -161,6 +192,52 @@ def analyze_cmd(ctx, *args, **kwargs):
 def send_cmd(ctx, *args, **kwargs):
     from brother_ql.backends.helpers import send
     send(instructions=kwargs['instructions'].read(), printer_identifier=ctx.meta.get('PRINTER'), backend_identifier=ctx.meta.get('BACKEND'), blocking=True)
+
+
+@cli.command(name="status", short_help="query printer status and the loaded media size")
+@click.pass_context
+def status_cmd(ctx, *args, **kwargs):
+    from brother_ql.backends.helpers import get_status, get_printer
+
+    printer=get_printer(ctx.meta.get("PRINTER"), ctx.meta.get("BACKEND"))
+    logger.debug("Sending status information request to the printer.")
+    result = get_status(printer)
+
+    print(f"Model: {result['model']}")
+    if result['model'] == "Unknown":
+        print("Unknown printer detected")
+        print(f"Series Code: 0x{result['series_code']:02x}")
+        print(f"Model Code: 0x{result['model_code']:02x}")
+    print(f"Status type: {result['status_type']}")
+    print(f"Phase: {result['phase_type']}")
+    if len(result['errors']) != 0:
+        print(f"Errors: {result['errors']}")
+    print(f"Media type: [{result['media_category']}] {result['media_type']}")
+    if result['media_category'] == 'TZe':
+        print("Note: tape color information may be incorrect for aftermarket tape cartridges.")
+        print(f"Tape color: {result['tape_color']}")
+        print(f"Text color: {result['text_color']}")
+    print(f"Media size: {result['media_width']} x {result['media_length']} mm")
+
+
+@cli.command(name="configure", short_help="read and modify printer settings")
+@click.argument('action', required=True, type=click.Choice(['get', 'set']), metavar='[ACTION]')
+@click.argument('key', required=True, type=click.Choice(['power-off-delay', 'auto-power-on']), metavar='[KEY]')
+@click.argument('value', type=int, metavar='[VALUE]', default=-1)
+@click.pass_context
+def configure_cmd(ctx, *args, **kwargs):
+    from brother_ql.backends.helpers import configure
+
+    if kwargs.get('action') == 'set' and kwargs.get('value') == -1:
+        raise ValueError(f"Specify a valid value for key {kwargs.get('key')}")
+
+    configure(
+        printer_identifier=ctx.meta.get("PRINTER"),
+        backend_identifier=ctx.meta.get("BACKEND"),
+        action=kwargs.get('action'),
+        key=kwargs.get('key'),
+        value=kwargs.get('value')
+    )
 
 if __name__ == '__main__':
     cli()
