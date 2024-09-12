@@ -19,7 +19,7 @@ class Model(object):
     #: for continuous tape printing.
     min_max_length_dots = attrib(type=Tuple[int, int])
     #: The minimum and maximum amount of feeding a label
-    min_max_feed = attrib(type=Tuple[int, int], default=(35, 1500))
+    min_max_feed = attrib(type=Tuple[int, int], default=(0, 1500))
     number_bytes_per_row = attrib(type=int, default=90)
     #: The required additional offset from the right side
     additional_offset_r = attrib(type=int, default=0)
